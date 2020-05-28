@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<!-- gör på detta vis för att hålla isär koden från ramverket i debuggern -->
+		<script src="https://spelprogrammering.nu/simple.js"/></script>
+
+		<script>
+
+		/*SPELINSTRUKTIONER
+		- Överlev så länge du kan genom att äta mindre figurer
+		- När du äter själ man motståndarens massa och växer
+		- Din massa minskar varje sekund, om man inte äter så svälter man
+		- Åker du på en större figur så förlorar du ett liv och du får ingen extra massa
+
+		MÅL
+		- Efter att du har dött poppar det upp lite statistik
+		*Överleven tid
+		*Din maximala storlek (capped vid 50)
+		*Fiender du slukat
+		- Tävla mot dig själv och se om du kan slå ditt eller andras rekord!
+
+		SÄTT ATT DÖ PÅ
+		1. Din massa sjunker ned till noll
+		2. Du förlorar alla dina liv
+
+		KONTROLLER
+		[W/Up] - Åk uppåt
+		[A/Left] - Åk åt vänster
+		[S/Down] - Åk nedåt
+		[D/Right] - Åk åt höger
+
+		[Space] - Aktivera boosten (gör att du tar dig fram snabbare, men förlorar massa fortare)
+		[R] - Utför "Remedy", ger upp ett liv i utbyte mot 10 storleksenheter (radie)
+
+		Vid Game Over kan du:
+		[Enter] - Spela om (laddar om sidan)
+		[Q] - Avsluta (stänger ned fliken i webbläsaren)
+
+
+		OBSERVERA
+		*60 fps satte jag eftersom det är standard för många datorspel
+		 vilket kan vara väldigt krävande för vissa datorer
+
+		*Tyvärr är väldigt mycket av koden byggd rund just 60 updatesPerSecond
+		 hade jag haft mer tid eller gjort om spelet så skulle jag
+		 t ex: använda fler variabler istället för exakta värden
+
+		*Om rutan blir alltför liten kan layouten bli konstig
+		 600x400 är minsta rekomenderad storlek
+
+		*En för stor ruta kan göra att det blir väldigt svårt att överleva
+		 en bättre lösning hade varit att anpassa antalet fiender utefter fönsterstorleken
+
+		*Koden är lång (~600 rader) och jag blev lite impulsiv i att lägga till extra saker
+		 kanske hade det varit bättre att stanna på 300-400 rader och skippa layout?
+
+		*Jag har gjort mitt bästa för att dela upp koden i delar (funktioner som hör ihop)
+		 och hålla update() så tom som möjligt
+
+		*I framtiden kommer jag att använda flera .js filer och hämta in koden på liknande sätt som ramverket
+		*/
+
+		function start() {
+			//position
+			x = totalWidth/2;
+			y = totalHeight/2;
+
+			//hastighet
+			playerSpeed = 3;
+			boost = false;
+			plusBoostSpeed = 2;
+
+			//storlek
+			playerRadius = 20;
+			maxSize = 50;
+			playerMaxRadius = 0;
+
+			//svält
+			starveMax = 600;
+			starveCount = 0;
+			starveRate = 10;
+			plusBoostStaveRate = 5;
+			starved = false;
+
+			//överlevnad
+			framesSurvived = 0;
+			secondsSurvived = 0;
+			minutesSurvived = 0;
+
+			//bränsle för boost
+			fuel = 0;
+			fuelMax = 25;
+			fuelRefill = 1;
+			fuelDrain = 1;
+			fuelRefillRestore = fuelRefill;
+			fuelDrainRestore = fuelDrain;
+				//räknar upp till en viss summa för att
+				//(senare i koden) kolla av ifall bränsle ska öka/minska
+			fuelTimer = 0;
+			drainTimer = 0;
+
+			//död
+			playerLives = 3;
+			deathCount = 0;
+			invTimer = 0;
+			gotEaten = false;
+
+			//räddning
+			remedyOn = false;
+			remText = "-";
+
+			//färger (rgba() ifall opacitet är relevant annars mixColor(rgb))
+			backC1 = random(100);
+			backC2 = random(100);
+			backC3 = random(100);
+				//hämtar ny färg för varje omladdning av sidan
+			backColor = mixColor(backC1, backC2, backC3);
+				//färg för resultatruta
+			sboxColor = "rgba(25, 25, 25, 0.6)";
+			playerColor = mixColor(random(155)+100, random(155)+100, random(155)+100);
+			blinkColor = mixColor(random(255), random(255), random(255));
+			textColor1 = mixColor(backC2+100, backC3+100, backC1+100);
+			textColor2 = mixColor(backC3+100, backC1+100, backC2+100);
+			textColor3 = mixColor(backC3+100, backC2+100, backC1+100);
+
+			//fiender
+				//gränsvärdet för att ny fiende ska skapas (NU: 9 800 av 10 000)
+			enemySpawn = 9800;
+			enemiesEaten = 0;
+			enemyMaxSize = 15;
+				//array för alla nya fiender
+			enemies = [];
+
+			//refresh rate
+			updatesPerSecond = 60;
+		}
+
+		////////////////////////////////////////////////////////////////////////
+					//FUNKTIONER SOM ÄR RELATERADE TILL SPELAREN
+		////////////////////////////////////////////////////////////////////////
+
+		//funktion som ändrar spelar färgen blinkar ifall man nyligen har förlorat ett liv
+		function player() {
+			if (playerRadius >= 1) {
+				//man är ödödlig i 300 frames
+				if (invTimer >= 300 || deathCount <= 0) {
+					circle(x, y, playerRadius, playerColor);
+				} else {
+					circle(x, y, playerRadius, blinkColor);
+				}
+			}
+		}
+
+		//funktion som håller arean konstant med radien
+		function pArea() {
+			playerArea = Math.PI*playerRadius*playerRadius;
+		}
+
+
+		////////////////////////////////////////////////////////////////////////
+							//FUNKTIONER FÖR REMEDY
+		////////////////////////////////////////////////////////////////////////
+
+		//funktion som ger spelaren möjlighet att öka med 10 storleksenheter i utbyte mot ett liv
+		function remedy() {
+			playerRadius += 10;
+			playerLives --;
+			deathCount ++;
+		}
+
+		//funktion som avgör om det är tillåtet att utföra remedy
+		function isRemedyOn() {
+			if (playerRadius <= 10 && playerLives > 1) {
+				remedyOn = true;
+			} else {
+				remedyOn = false;
+			}
+
+			if (remedyOn == true) {
+				remText = "On";
+			} else {
+				remText = "-";
+			}
+		}
+
+
+		////////////////////////////////////////////////////////////////////////
+							//FUNKTIONER OM ÖVERLEVNAD
+		////////////////////////////////////////////////////////////////////////
+
+		//funktion som håller koll på tiden man har överlevt i minuter:sekunder:frames
+		function survival() {
+			if (framesSurvived == updatesPerSecond) {
+				secondsSurvived++;
+				framesSurvived = 0;
+			}
+			if (secondsSurvived == 60) {
+				minutesSurvived++;
+				secondsSurvived = 0;
+			}
+		}
+
+		function starve() {
+			//om spelarens storlek är över noll så minskar den för varje update (svält)
+			if (playerRadius > 0) {
+				starveCount += starveRate;
+				if (boost == true) {
+					starveCount += plusBoostStaveRate;
+				}
+				if (starveCount >= starveMax) {
+					playerRadius--;
+					starveCount = 0;
+				}
+			}
+		}
+
+		//om spelaren är större än maximala storleken hålls den kvar
+		function growthStop() {
+			if (playerRadius > maxSize) {
+				playerRadius = maxSize;
+			}
+
+			if (playerRadius > playerMaxRadius) {
+				playerMaxRadius = playerRadius;
+			}
+		}
+
+		//gör så att det blinkar när man är odödlig när man blivit skadad
+		function invincible() {
+			blinkColor = mixColor(random(255), random(255), random(255));
+			invTimer++;
+		}
+
+
+		////////////////////////////////////////////////////////////////////////
+							//FUNKTIONER FÖR RÖRELSE
+		////////////////////////////////////////////////////////////////////////
+
+		//denna funktion håller koll på spelarens hastighet
+		function speed() {
+			//definerar när man använder boosten
+			//boost kan användas för att öka hastigheten men förlora massa snabbare
+			if (keyboard.space && fuel > 0) {
+				boost = true;
+			} else {
+				boost = false;
+			}
+
+			//saktar ner boost refillen
+			if (fuelTimer < 40) {
+				fuelRefill = 0;
+				fuelTimer++;
+			} else {
+				fuelRefill = fuelRefillRestore;
+				fuelTimer = 0;
+			}
+
+			//saktar ner boost konsumtionen
+			//det konsumeras 8 gånger fortare än det fylls på
+			if (drainTimer < 5) {
+				fuelDrain = 0;
+				drainTimer++;
+			} else {
+				fuelDrain = fuelDrainRestore;
+				drainTimer = 0;
+			}
+
+			//avgör hur mycket som ska konsumeras och påfyllas
+			if (boost == true) {
+				fuel -= fuelDrain;
+			}
+
+			if (fuel < fuelMax && boost == false) {
+				fuel += fuelRefill;
+			}
+
+			//kontroller för rörelse och boostens extra-fart
+			//ser till att spelaren håller sig inom det synliga fältet
+			if (x-playerRadius > 0) {
+				if (keyboard.left || keyboard.a) {
+					x -= playerSpeed;
+					if (boost == true) {
+						x -= plusBoostSpeed;
+					}
+				}
+			}
+
+			if (x+playerRadius < totalWidth) {
+				if (keyboard.right || keyboard.d) {
+					x += playerSpeed;
+					if (boost == true) {
+						x += plusBoostSpeed;
+					}
+				}
+			}
+
+			if (y-playerRadius > 0) {
+				if (keyboard.up || keyboard.w) {
+					y -= playerSpeed;
+					if (boost == true) {
+						y -= plusBoostSpeed;
+					}
+				}
+			}
+
+			if (y+playerRadius < totalHeight) {
+				if (keyboard.down || keyboard.s) {
+					y += playerSpeed;
+					if (boost == true) {
+						y += plusBoostSpeed;
+					}
+				}
+			}
+		}
+
+
+		////////////////////////////////////////////////////////////////////////
+									//FIENDER
+		////////////////////////////////////////////////////////////////////////
+
+		function enemyCall() {
+			//istället för att skriva en for loop
+			//och anropa funktionens update()
+			//for (let i = 0; i<enemies.length; i++) {
+			//	var e = enemies[i];
+			//	e.update();
+			//}
+			//så gör jag en förkortning med metoden map() och en arrow function
+			enemies.map(e => e.update());
+
+			//en ny fiende skapas slumpmässigt
+			var z = random(10000);
+			if (z >= enemySpawn) {
+				enemies.push(new enemy());
+			}
+		}
+
+		//funktionen konstruerar en ny fiende
+		function enemy() {
+			//fiendens attributer
+			//this.variabel eftersom dessa värden endast appliceras till just denna instans av enemy()
+			this.rad = random(enemyMaxSize)+1;
+			this.x = random(totalWidth-4*(this.rad)+2*(this.rad));
+			this.y = random(totalHeight-4*(this.rad)+2*(this.rad));
+			this.color = "rgba(255, 255, 255, 1)";
+			this.area = Math.PI*this.rad*this.rad;
+			this.enemyLifespan = 300;
+			this.lifeCounter = 0;
+
+			//ser till att fienden inte spawnas inuti spelaren
+			//får ej överlappa i x-led
+			while (this.x <= x+playerRadius && this.x >= x-playerRadius) {
+				this.x = random(totalWidth-4*(this.rad)+2*(this.rad));
+			}
+
+			//får ej överlappa i y-led
+			while (this.y <= y+playerRadius && this.y >= y-playerRadius) {
+				this.y = random(totalHeight-4*(this.rad)+2*(this.rad));
+			}
+
+
+			//funktionen håller kvar just denna fiende i update-loopen
+			this.update = function() {
+				//tar bort fiender efter en viss livslängd
+				this.lifeCounter++;
+				if (this.lifeCounter <= this.enemyLifespan) {
+					circle(this.x, this.y, this.rad, this.color);
+
+					//spelarens area uppdateras
+					pArea();
+
+					//här skapas hitboxen
+					var dx = x-this.x;
+					var dy = y-this.y;
+					var distance = Math.sqrt(dx*dx + dy*dy)
+
+					if (distance < this.rad/4 + playerRadius && playerRadius > this.rad) {
+						if (this.rad > 0) {
+							enemiesEaten++;
+						}
+						//spelarens area ökar med den uppätna fiendens area och tar sedan bort fienden
+						playerArea += this.area;
+						playerRadius = Math.sqrt(playerArea/Math.PI);
+						this.rad = 0;
+						this.area = 0;
+						//vad som sker om fienden är större än spelaren
+					} else if (distance < this.rad + playerRadius && playerRadius < this.rad) {
+						if (invTimer >= 240 && playerLives >= 0) {
+							playerLives--;
+							invTimer = 0;
+							deathCount++;
+						}
+
+					}
+				}
+
+			}
+		}
+
+
+		////////////////////////////////////////////////////////////////////////
+									//USER INTERFACE
+		////////////////////////////////////////////////////////////////////////
+
+		//funktionen gör bakgrunden som en canvas detta innebär att spelytan är bestämd vid den storlek som fönstret är vid start
+		function background() {
+			canvas = document.getElementById("canvas");
+			back = canvas.getContext("2d");
+			back.fillStyle = backColor;
+			back.fillRect(0, 0, canvas.width, canvas.height);
+		}
+
+		//funktion över allting som har med statistik och visuell overlay att göra
+		function score() {
+
+			//minibakgrund för text
+			function sbox() {
+				textSpace = canvas.getContext("2d");
+				textSpace.fillStyle = sboxColor;
+				textSpace.fillRect(sboxX, sboxY, sboxLength, sboxHeight);
+			}
+
+			//funktion för en textruta
+			function text() {
+				write = canvas.getContext("2d");
+				write.font = textFont;
+				write.fillStyle = textC;
+				write.textAlign = textPlace;
+				write.fillText(insertText, textX, textY);
+			}
+
+			//varje textruta bestämer sina attributer och kallar sedan på funktionerna
+
+			//Spelets titel
+			sboxColor = "rgba(200, 200, 200, 0.5)";
+			sboxX = 4*canvas.width/16;
+			sboxY = canvas.height/32;
+			sboxLength = 8*canvas.width/16;
+			sboxHeight = 4*canvas.height/32;
+			textFont = "Bold 50px Comic Sans MS";
+			textC = "rgba(10, 10, 10, 0.9)";
+			textPlace = "center";
+			insertText = "Scavenge.io";
+			textX = canvas.width/2;
+			textY = canvas.height/8;
+			sbox();
+			text();
+
+			//spelarens antal liv
+			sboxColor = "rgba(25, 25, 25, 0.6)";
+			sboxX = canvas.width/32;
+			sboxY = canvas.height-82;
+			sboxLength = 10*canvas.width/32;
+			sboxHeight = 38;
+			textFont = "30px Impact";
+			textC = textColor1;
+			textPlace = "start";
+			insertText = "Player lives: " + playerLives;
+			textX = canvas.width/16;
+			textY = canvas.height-50;
+			sbox();
+			text();
+
+			//spelarens nuvarande storlek (avrundat till heltal)
+			sboxY = canvas.height-122;
+			textC = textColor2;
+			insertText = "Size: " + Math.round(playerRadius);
+			textY = canvas.height-90;
+			sbox();
+			text();
+
+			//hur mycket bränsle finns för boosten
+			sboxX = 21*canvas.width/32;
+			textC = textColor1;
+			textPlace = "end";
+			insertText = "Boost (space): " + fuel;
+			textX = 15*canvas.width/16;
+			sbox();
+			text();
+
+			//är remedy tillgängligt
+			sboxY = canvas.height-82;
+			textC = textColor2;
+			insertText = "Remedy (R): " + remText;
+			textY = canvas.height-50;
+			sbox();
+			text();
+		}
+
+
+		////////////////////////////////////////////////////////////////////////
+								//GAME OVER FUNKTIONER
+		////////////////////////////////////////////////////////////////////////
+
+		//funktion över vad det ska stå vid game over beroende på hur man dog
+		function deathText() {
+			//om man svälter till döds
+			if (starved == true) {
+				gameOverText = "STARVED!";
+			}
+
+			//om man förlorar alla sina liv
+			if (gotEaten == true) {
+				gameOverText = "YOU DIED!";
+			}
+		}
+
+		//funktion som gör så att en game over popup uppstår om spelaren dör
+		function gameOver() {
+			playerRadius = 0;
+			playerLives = 0;
+			fuel = 0;
+			fuelRefillRestore = 0;
+
+			//översiktlig game over text
+			deathScreen = canvas.getContext("2d");
+
+			function gameOverBox() {
+				deathScreen.fillStyle = "rgba(150, 150, 0, 0.9)";
+				deathScreen.fillRect(canvas.width/4, canvas.height/4, 2*canvas.width/4, 9*canvas.height/16);
+			}
+
+			function gameOverResults() {
+				deathScreen.font = gameOverFont;
+				deathScreen.fillStyle = goTextColor;
+				deathScreen.textAlign = goTextPlace;
+				deathScreen.fillText(insertGoText, goTextX, goTextY);
+			}
+
+			//bakgrund för game-over ruta
+			gameOverBox();
+
+			//titel för game-over rutan
+			gameOverFont = "Bold 40px Times New Roman";
+			goTextColor = "black";
+			goTextPlace = "center";
+			insertGoText = gameOverText;
+			goTextX = canvas.width/2;
+			goTextY = 3*canvas.height/8;
+			gameOverResults();
+
+			//Talar om hur länge spelaren överlevde
+			gameOverFont = "20px Impact";
+			goTextPlace = "start";
+			insertGoText = "Time survived:";
+			goTextX = 2*canvas.width/7;
+			goTextY = 8*canvas.height/16;
+			gameOverResults();
+
+			goTextColor = "purple";
+			goTextPlace = "end";
+			//dessa if-else statementsen gör så att formatet XX:XX behålls | istället för 6: 2 => 06:02
+			if (minutesSurvived < 10) {
+				if (secondsSurvived < 10) {
+					insertGoText = "0" + minutesSurvived + " : 0" + secondsSurvived;
+				} else {
+					insertGoText = "0" + minutesSurvived + " : " + secondsSurvived;
+				}
+			} else {
+				if (secondsSurvived < 10) {
+					insertGoText = minutesSurvived + " : 0" + secondsSurvived;
+				} else {
+					insertGoText = minutesSurvived + " : " + secondsSurvived;
+				}
+			}
+			goTextX = 5*canvas.width/7;
+			gameOverResults();
+
+			/////////////////////////////////////
+			//Talar om spelarens maximala storlek
+			goTextColor = "black";
+			goTextPlace = "start";
+			insertGoText = "Maximum size:";
+			goTextX = 2*canvas.width/7;
+			goTextY = 9*canvas.height/16;
+			gameOverResults();
+
+			goTextColor = "blue";
+			goTextPlace = "end";
+			insertGoText = Math.round(playerMaxRadius);
+			goTextX = 5*canvas.width/7
+			gameOverResults();
+
+			/////////////////////////////////////
+			//Talar om hur många fiender som åts
+			goTextColor = "black";
+			goTextPlace = "start";
+			insertGoText = "Enemies eaten:";
+			goTextX = 2*canvas.width/7;
+			goTextY = 10*canvas.height/16;
+			gameOverResults();
+
+			goTextColor = "red";
+			goTextPlace = "end";
+			insertGoText = enemiesEaten;
+			goTextX = 5*canvas.width/7;
+			gameOverResults();
+
+			/////////////////////////////////////
+			//Spela igen
+			goTextColor = "black";
+			goTextPlace = "start";
+			insertGoText = "Play again:";
+			goTextX = 2*canvas.width/7;
+			goTextY = 11*canvas.height/16;
+			gameOverResults();
+
+			goTextPlace = "end";
+			insertGoText = "[Enter]";
+			goTextX = 5*canvas.width/7;
+			gameOverResults();
+			if (keyboard.enter) {
+				document.location.reload();
+			}
+
+			/////////////////////////////////////
+			//Avsluta
+			goTextColor = "black";
+			goTextPlace = "start";
+			insertGoText = "Quit:";
+			goTextX = 2*canvas.width/7;
+			goTextY = 12*canvas.height/16;
+			gameOverResults();
+
+			goTextPlace = "end";
+			insertGoText = "[Q]";
+			goTextX = 5*canvas.width/7;
+			gameOverResults();
+			if (keyboard.q) {
+				window.close();
+			}
+		}
+
+
+		////////////////////////////////////////////////////////////////////////
+										//UPDATE
+		////////////////////////////////////////////////////////////////////////
+
+		//funktionen updateras varje frame här påkallas alla funktioner i rätt ordning
+		function update() {
+			//funktioner som ankallas direkt varje frame
+			clearScreen();
+			background();
+			speed();
+			isRemedyOn();
+
+			//anropar spelarens figur och "slår tärning" om en fiende uppstår
+			player();
+				//notera att funktionen enemy() konstrueras/skapas inuti denna funktion
+			enemyCall();
+
+			//gör så att om spelaren är odödlig så lyser den med en ny färg för varje update (det blinkar)
+			invincible();
+
+			//kontroller för att utföra remedy
+			if (keyboard.r) {
+				if (remedyOn == true) {
+					remedy();
+					remedyOn = false;
+				}
+			}
+
+			//spelaren förlorar massa över tid
+			starve();
+
+			//maximala storleken
+			growthStop();
+
+			//spelarens resultat uppdateras
+			score();
+
+			//har spelaren dött?
+			if (playerRadius < 1) {
+				starved = true;
+				deathText();
+				gameOver();
+			} else if (playerLives < 1) {
+				gotEaten = true;
+				deathText();
+				gameOver();
+			}
+			//överlevnad
+			else {
+				framesSurvived++;
+			}
+
+			//uppdateras varje frame som man har överlevt (tiden)
+			survival();
+		}
+
+		</script>
+	</head>
+
+	<body>
+	</body>
+</html>
